@@ -11,4 +11,5 @@ def custom_settings():
     kotti_component.resources  # make pyflakes happy
     return {
         'kotti.configurators': 'kotti_annotation.kotti_configure '
-                               'kotti_component.kotti_configure'}
+                               'kotti_component.kotti_configure'
+        }

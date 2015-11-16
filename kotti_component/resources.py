@@ -6,6 +6,7 @@ from zope.interface import implements
 
 from sqlalchemy.orm import relation
 from sqlalchemy.orm import backref
+from sqlalchemy.orm.collections import attribute_mapped_collection
 from sqlalchemy import Column
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
@@ -17,7 +18,7 @@ from sqlalchemy.ext.associationproxy import association_proxy
 
 from kotti import Base
 from kotti.interfaces import IDefaultWorkflow
-from kotti.resources import Content
+from kotti.resources import Node, Content
 from kotti.sqla import NestedMutationList
 from kotti.sqla import NestedMutationDict
 from kotti.sqla import JsonType
@@ -34,60 +35,24 @@ def cls_lookup(self, klass):
     return locate(klass)
 
 
-class SchemaValidator(Base):
-    """Define a Validator of a schema node 
-    """
-
-    schemanode_id = Column(Integer, ForeignKey('schema_nodes.id'), primary_key=True)
-    klass = Column(String(50))
-    args = Column(NestedMutationList.as_mutable(JsonType))
-    kwargs = Column(NestedMutationDict.as_mutable(JsonType))
-    position = Column(Integer())
-
-    parent = relation(
-        'SchemaNode',
-        backref=backref(
-            '_validators',
-            collection_class=ordering_list('position'),
-            order_by=[position],
-            cascade='all',
-        )
-    )
-
-    def cook(self):
-        """Return a validator object
-        """
-        return cls_lookup(self.klass)(*self.args, **self.kwargs)
-
-
-class SchemaNode(Base):
+class SchemaNode(Content):
     """SchemaNode is a Schema
     """
 
     __tablename__ = 'schema_nodes'
 
     #: Primary key for the node in the DB
-    #: (:class:`sqlalchemy.types.Integer`)
     id = Column(Integer(), primary_key=True)
-    #: Schemanode is children of Dataschema
-    #: (:class:`sqlalchemy.types.String`)
-    component_id = Column(Integer, ForeignKey('components.id'))
-    #: Name of the node
-    #: (:class:`sqlalchemy.types.String`)
-    name = Column(String(50))
     #: Value type of the node, use to lookup the SchemaNode class to instantiate
-    #: (:class:`sqlalchemy.types.String`)
     klass = Column(String(50))
-    #: Annotation value
-    #: (:class:`kotti.sqla.JsonType`)
     default = Column(JSONAlchemy(Text))
-    #: 
     #: 
     required = Column(Boolean)
     #: Position of the node within its container / parent
-    #: (:class:`sqlalchemy.types.Integer`)
     position = Column(Integer())
-    #: Additional arguments like title, description, widget name etc
+    widget = Column(JSONAlchemy(Text))
+    validator = Column(JSONAlchemy(Text))
+    #: Additional arguments like title, description, etc
     kwargs = Column(NestedMutationDict.as_mutable(JsonType))
 
     parent = relation(
@@ -119,6 +84,7 @@ class SchemaNode(Base):
             default=self.default,
             missing=self.required and colander.required or colander.drop,
             validator=validator,
+            **self.kwargs
             )
 
 
@@ -130,12 +96,20 @@ class Component(Content):
 
     id = Column(Integer, ForeignKey('contents.id'), primary_key=True)
 
+    type_info = Content.type_info.copy(
+        name=u'Entity',
+        title=_(u'Entity'),
+        add_view=u'add_entity',
+        addable_to=[u'Entity', u'Document'],
+        )
+
     def schema(self):
         """Build colander schema from associated schema nodes
         """
         schema = colander.SchemaNode(colander.Mapping())
         for node in self._schemanodes:
             schema.add(node.cook())
+        return schema
 
     def save(self, entity, cstruct):
         """Save data to the entity instance
@@ -143,7 +117,7 @@ class Component(Content):
         schema = self.schema()
         appstruct = schema.deserialize(cstruct)
         for key in appstruct:
-            entity.key = appstruct[key]
+            setattr(entity, key, appstruct[key])
         # if self not in entity.components:
         #     entity.components.append(self)
         #TODO: Fire event ?
@@ -167,8 +141,9 @@ class Component(Content):
     def __json__(self):
         """
         """
-        return dict((key, getattr(key) for key in 
-            self.__table__.columns.keys() + self._annotations.keys()))
+        return dict([ (key, getattr(key)) for key in 
+            self.__table__.columns.keys() + self._annotations.keys()
+            ])
 
 
 class ComponentToEntity(Base):
@@ -178,10 +153,8 @@ class ComponentToEntity(Base):
     __tablename__ = 'components_to_entities'
 
     #: Foreign key referencing :attr:`Component.id`
-    #: (:class:`sqlalchemy.types.Integer`)
     component_id = Column(Integer, ForeignKey('components.id'), primary_key=True)
     #: Foreign key referencing :attr:`Entity.id`
-    #: (:class:`sqlalchemy.types.Integer`)
     entity_id = Column(Integer, ForeignKey('entities.id'), primary_key=True)
     #: Ordering position
     #: :class:`sqlalchemy.types.Integer`
@@ -218,33 +191,14 @@ class Entity(Content):
         addable_to=[u'Entity', u'Document'],
         )
 
-    base_mapping = ESMapping(
-        analyzer='content',
-        properties=ESMapping(
-            ESField('_id'),
-            ESString('title', attr='_title'),
-            ESString('description', attr='_description'),
-            ESString('body', attr='_body', filter=html_to_text),
-            ESField('path',
-                    attr='_path',
-                    index='not_analyzed',
-                    ),
-            ESField('name',
-                    attr='_name',
-                    index='not_analyzed',
-                    ),
-            ESField('language',
-                    attr='_language',
-                    index='not_analyzed',
-                    ),
-            ESField('state',
-                    attr='_state',
-                    index='not_analyzed',
-                    ),
-            ))
-
     def __init__(self, **kwargs):
         super(Entity, self).__init__(**kwargs)
+
+    def __json__(self):
+        d = dict([(key, getattr(self, key)) 
+            for key in self.__table__.columns.keys()])
+        d.update(IAnnotations(self))
+        return d
 
     def __setattr__(self, name, value):
         if not hasattr(self, name) and not name.startswith('_'):
@@ -257,11 +211,16 @@ class Entity(Content):
             return super(Entity, self).__getattr__(name)
         except AttributeError:
             if name.startswith('_'):
-                raise AttributeError
-            anno = IAnnotations(self)
-            if name in anno:
-                return anno[name]
+                raise AttributeError(name)
+            if name in self._annotations:
+                return IAnnotations(self)[name]
             raise AttributeError
+
+    # def add_component(self, com):
+    #     # Check attribute & add missing value 
+    #     # for node in com.schema():
+
+    #     self._components.append(com)
 
 
 class I18nAttribute(Base):
@@ -271,16 +230,12 @@ class I18nAttribute(Base):
     __tablename__ = 'i18n'
 
     #: Foreign key referencing :attr:`Node.id`
-    #: (:class:`sqlalchemy.types.Integer`)
     node_id = Column(Integer, ForeignKey('nodes.id'), primary_key=True)
     #: Name of the attribute
-    #: (:class:`sqlalchemy.types.String`)
     name = Column(String(50), primary_key=True)
     #: Language of the translatetion
-    #: (:class:`kotti.sqla.JsonType`)
     lang = Column(String(10))
     #: Translation value
-    #: (:class:`kotti.sqla.JsonType`)
     value = Column(JSONAlchemy(Text))
     node = relation(Node, backref=backref(
             "_i18n", 
@@ -300,3 +255,9 @@ class I18nAttribute(Base):
         self.lang = lang
         self.value = value
 
+
+class I12Application(Content):
+    """ An application contains its own components, API accesskey etc...
+        User create an application, create api key and use the key to access
+        the api.
+    """

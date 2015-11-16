@@ -25,6 +25,7 @@ def kotti_configure(settings):
 
     settings['pyramid.includes'] += ' kotti_component'
     settings['kotti.available_types'] += ' kotti_component.resources.Entity'
+    settings['kotti.fanstatic.view_needed'] += ' kotti_component.fanstatic.css_and_js'
     Document.type_info.addable_to.append('Entity')
 
 
@@ -38,5 +39,6 @@ def includeme(config):
 
     config.include('pyramid_zcml')
     config.load_zcml('configure.zcml')
-    
+    config.add_static_view('static-kotti_component', 'kotti_component:static')
+
     config.scan(__name__)
