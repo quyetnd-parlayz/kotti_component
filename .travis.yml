@@ -12,7 +12,8 @@ install:
   - pip install -e . -r https://raw.github.com/Kotti/Kotti/stable/requirements.txt
   - pip install --pre Kotti
   - pip install "wsgi_intercept==0.5.1"
-  - python setup.py devbefore_script:
+  - python setup.py dev
+before_script:
   - psql -c 'create database kotti_component_testing;' -U postgres
   - mysql -e 'create database kotti_component_testing;'
 script: py.test --tb=native --cov=kotti --cov-report=term-missing
